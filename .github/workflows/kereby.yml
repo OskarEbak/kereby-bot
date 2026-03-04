@@ -2,7 +2,7 @@ name: kereby-bot
 
 on:
   schedule:
-    - cron: "* * * * *"   # hvert minut
+    - cron: "*/5 * * * *"
   workflow_dispatch:
 
 jobs:
