@@ -41,5 +41,7 @@ jobs:
       - name: Run bot
         env:
           NTFY_TOPIC: kereby-oeupdate
+          MAX_LISTINGS: "30"
+          REQ_TIMEOUT_S: "15"
         run: |
           python kereby_watch.py
