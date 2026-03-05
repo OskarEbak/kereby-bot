@@ -2,7 +2,7 @@ name: kereby-bot
 
 on:
   schedule:
-    - cron: "*/5 * * * *"
+    - cron: "*/10 * * * *"
   workflow_dispatch:
 
 concurrency:
@@ -52,14 +52,17 @@ jobs:
         run: |
           python -m playwright install chromium
 
-      - name: Run bot
+      - name: Run bot (repeat checks)
         env:
           NTFY_TOPIC: kereby-oeupdate
           MAX_LISTINGS: "30"
-          # Force DB to be exactly the cached file path
           KEREBY_DB: ${{ github.workspace }}/kereby_seen.sqlite3
         run: |
-          python kereby_watch.py
+          for i in {1..9}; do
+            echo "Check $i at $(date -u)"
+            python kereby_watch.py
+            sleep 60
+          done
 
       - name: Debug DB after run
         run: |
