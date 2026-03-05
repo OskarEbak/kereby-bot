@@ -5,6 +5,11 @@ on:
     - cron: "*/5 * * * *"
   workflow_dispatch:
 
+# Prevent overlapping runs if one gets delayed/queued
+concurrency:
+  group: kereby-bot
+  cancel-in-progress: true
+
 jobs:
   run-bot:
     runs-on: ubuntu-latest
@@ -16,11 +21,22 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+          cache: "pip"  # caches pip automatically based on requirements.txt
+
+      # Cache Playwright browsers so Chromium isn't downloaded every run
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-playwright-${{ hashFiles('requirements.txt') }}
 
       - name: Install dependencies
         run: |
           pip install -r requirements.txt
-          playwright install chromium
+
+      - name: Install Playwright Chromium (uses cache if available)
+        run: |
+          python -m playwright install chromium
 
       - name: Run bot
         env:
