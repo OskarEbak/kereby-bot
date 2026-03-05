@@ -37,6 +37,11 @@ jobs:
       - name: Install Playwright Chromium (uses cache if available)
         run: |
           python -m playwright install chromium
+          
+      - name: Send test notification
+        run: |
+          curl -d "GitHub workflow test notification ✅" https://ntfy.sh/kereby-oeupdate
+
 
       - name: Run bot
         env:
