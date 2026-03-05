@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 import os
-import re
 import sqlite3
 import time
-from typing import List, Set, Tuple
+from typing import List, Set
 
 import requests
 from playwright.sync_api import sync_playwright
@@ -11,48 +10,33 @@ from playwright.sync_api import sync_playwright
 START_URL = "https://kerebyudlejning.dk/"
 DB_PATH = os.environ.get("KEREBY_DB", "kereby_seen.sqlite3")
 
-# ntfy
 NTFY_TOPIC = os.environ.get("NTFY_TOPIC", "").strip()
 NTFY_SERVER = os.environ.get("NTFY_SERVER", "https://ntfy.sh").rstrip("/")
-
-# Optional speed knobs (set via env in GitHub Actions)
-MAX_LISTINGS = int(os.environ.get("MAX_LISTINGS", "60"))          # check only newest N urls
-PAGE_TIMEOUT_MS = int(os.environ.get("PAGE_TIMEOUT_MS", "45000"))  # Playwright timeouts
-REQ_TIMEOUT_S = int(os.environ.get("REQ_TIMEOUT_S", "20"))        # requests timeout per listing
-
-STATUS_RE = re.compile(r"\b(Ledig|Reserveret|Udlejet)\b\.?", re.IGNORECASE)
-RENT_RE = re.compile(r"Leje\s+([\d\.\s]+)\s*kr\./md\.", re.IGNORECASE)
-TITLE_RE = re.compile(r"<title>\s*(.*?)\s*</title>", re.IGNORECASE | re.DOTALL)
+MAX_LISTINGS = int(os.environ.get("MAX_LISTINGS", "80"))
+PAGE_TIMEOUT_MS = int(os.environ.get("PAGE_TIMEOUT_MS", "45000"))
 
 
 def db_init(conn: sqlite3.Connection) -> None:
-    # Stores last known status per listing url
     conn.execute(
         """
-        CREATE TABLE IF NOT EXISTS listings (
+        CREATE TABLE IF NOT EXISTS seen (
             url TEXT PRIMARY KEY,
-            first_seen_ts INTEGER NOT NULL,
-            last_status TEXT
+            first_seen_ts INTEGER NOT NULL
         )
         """
     )
     conn.commit()
 
 
-def get_listing_status(conn: sqlite3.Connection, url: str) -> str | None:
-    cur = conn.execute("SELECT last_status FROM listings WHERE url = ?", (url,))
-    row = cur.fetchone()
-    return row[0] if row else None
+def already_seen(conn: sqlite3.Connection, url: str) -> bool:
+    cur = conn.execute("SELECT 1 FROM seen WHERE url = ?", (url,))
+    return cur.fetchone() is not None
 
 
-def save_listing_status(conn: sqlite3.Connection, url: str, status: str) -> None:
+def mark_seen(conn: sqlite3.Connection, url: str) -> None:
     conn.execute(
-        """
-        INSERT INTO listings (url, first_seen_ts, last_status)
-        VALUES (?, ?, ?)
-        ON CONFLICT(url) DO UPDATE SET last_status=excluded.last_status
-        """,
-        (url, int(time.time()), status),
+        "INSERT OR IGNORE INTO seen (url, first_seen_ts) VALUES (?, ?)",
+        (url, int(time.time())),
     )
     conn.commit()
 
@@ -62,21 +46,13 @@ def send_ntfy(session: requests.Session, title: str, message: str, link: str) ->
         raise RuntimeError("NTFY_TOPIC is missing (set env var NTFY_TOPIC).")
 
     url = f"{NTFY_SERVER}/{NTFY_TOPIC}"
-    headers = {
-        "Title": title,
-        "Click": link,
-        "Priority": "high",
-    }
+    headers = {"Title": title, "Click": link, "Priority": "high"}
     session.post(url, data=message.encode("utf-8"), headers=headers, timeout=15).raise_for_status()
 
 
 def fetch_bolig_urls() -> List[str]:
     """
-    Open homepage (JS) and collect links matching /bolig/...
-    Optimized:
-    - domcontentloaded (faster than networkidle)
-    - block images/fonts/media
-    - keep DOM order and only return first MAX_LISTINGS
+    Render homepage and collect /bolig/ links (fast settings).
     """
     urls: List[str] = []
     seen: Set[str] = set()
@@ -86,8 +62,7 @@ def fetch_bolig_urls() -> List[str]:
         page = browser.new_page()
 
         def route_handler(route):
-            rtype = route.request.resource_type
-            if rtype in ("image", "media", "font"):
+            if route.request.resource_type in ("image", "media", "font"):
                 return route.abort()
             return route.continue_()
 
@@ -114,63 +89,25 @@ def fetch_bolig_urls() -> List[str]:
     return urls
 
 
-def fetch_status_title_rent(session: requests.Session, url: str) -> Tuple[str, str, str]:
-    r = session.get(url, timeout=REQ_TIMEOUT_S)
-    r.raise_for_status()
-    html = r.text
-
-    m = STATUS_RE.search(html)
-    status = m.group(1).lower() if m else "ukendt"
-
-    title_m = TITLE_RE.search(html)
-    title = title_m.group(1).strip() if title_m else "Kereby bolig"
-
-    rent_m = RENT_RE.search(html)
-    rent = (rent_m.group(1).strip() + " kr./md.") if rent_m else "Husleje: ukendt"
-
-    return status, title, rent
-
-
 def main() -> None:
     session = requests.Session()
-    session.headers.update({"User-Agent": "kereby-watch/2.0"})
+    session.headers.update({"User-Agent": "kereby-new-listings/1.0"})
 
     with sqlite3.connect(DB_PATH) as conn:
         db_init(conn)
 
-        bolig_urls = fetch_bolig_urls()
+        urls = fetch_bolig_urls()
 
-        became_ledig = 0
-        new_listings = 0
-
-        for url in bolig_urls:
-            try:
-                status, title, rent = fetch_status_title_rent(session, url)
-            except Exception as e:
-                print(f"WARN: failed to fetch listing: {url} ({e})")
+        new_count = 0
+        for url in urls:
+            if already_seen(conn, url):
                 continue
 
-            previous_status = get_listing_status(conn, url)
+            send_ntfy(session, "Ny Kereby listing", url, url)
+            mark_seen(conn, url)
+            new_count += 1
 
-            # 1) New listing discovered (notify regardless of status)
-            if previous_status is None:
-                msg = f"Status: {status}\n{title}\n{rent}\n{url}"
-                send_ntfy(session, "Ny Kereby bolig", msg, url)
-                new_listings += 1
-
-            # 2) Existing listing became available
-            elif previous_status != "ledig" and status == "ledig":
-                msg = f"{title}\n{rent}\n{url}"
-                send_ntfy(session, "Kereby bolig blev ledig", msg, url)
-                became_ledig += 1
-
-            # Save latest status
-            save_listing_status(conn, url, status)
-
-        print(
-            f"Done. Nye boliger: {new_listings}. Blev ledig: {became_ledig}. "
-            f"Checked: {len(bolig_urls)}"
-        )
+        print(f"Done. New listings: {new_count}. Checked: {len(urls)}")
 
 
 if __name__ == "__main__":
