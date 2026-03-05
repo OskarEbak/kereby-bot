@@ -5,7 +5,6 @@ on:
     - cron: "*/5 * * * *"
   workflow_dispatch:
 
-# Prevent overlapping runs if one gets delayed/queued
 concurrency:
   group: kereby-bot
   cancel-in-progress: true
@@ -13,17 +12,32 @@ concurrency:
 jobs:
   run-bot:
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ github.workspace }}
 
     steps:
       - uses: actions/checkout@v4
+
+      - name: Cache bot state (SQLite)
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/kereby_seen.sqlite3
+          key: kereby-state-v1
+          restore-keys: kereby-state-
+
+      - name: Debug cache presence
+        run: |
+          pwd
+          ls -la
+          if [ -f kereby_seen.sqlite3 ]; then echo "DB exists ✅"; else echo "DB missing ❌"; fi
 
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-          cache: "pip"  # caches pip automatically based on requirements.txt
+          cache: "pip"
 
-      # Cache Playwright browsers so Chromium isn't downloaded every run
       - name: Cache Playwright browsers
         uses: actions/cache@v4
         with:
@@ -34,21 +48,19 @@ jobs:
         run: |
           pip install -r requirements.txt
 
-      - name: Install Playwright Chromium (uses cache if available)
+      - name: Install Playwright Chromium
         run: |
           python -m playwright install chromium
-          
-      - name: Cache bot state (SQLite)
-        uses: actions/cache@v4
-        with:
-          path: kereby_seen.sqlite3
-          key: kereby-state-v1
-          restore-keys: kereby-state-
-          
+
       - name: Run bot
         env:
           NTFY_TOPIC: kereby-oeupdate
           MAX_LISTINGS: "30"
-          REQ_TIMEOUT_S: "15"
+          # Force DB to be exactly the cached file path
+          KEREBY_DB: ${{ github.workspace }}/kereby_seen.sqlite3
         run: |
           python kereby_watch.py
+
+      - name: Debug DB after run
+        run: |
+          ls -la kereby_seen.sqlite3 || true
