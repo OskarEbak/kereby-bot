@@ -14,7 +14,7 @@ DB_PATH = os.environ.get("KEREBY_DB", "kereby_seen.sqlite3")
 NTFY_TOPIC = os.environ.get("NTFY_TOPIC", "").strip()
 NTFY_SERVER = os.environ.get("NTFY_SERVER", "https://ntfy.sh").rstrip("/")
 
-MAX_LISTINGS = int(os.environ.get("MAX_LISTINGS", "50"))
+MAX_LISTINGS = int(os.environ.get("MAX_LISTINGS", "30"))
 PAGE_TIMEOUT_MS = int(os.environ.get("PAGE_TIMEOUT_MS", "45000"))
 
 
@@ -53,7 +53,12 @@ def send_ntfy(session: requests.Session, title: str, message: str, link: str) ->
         "Click": link,
         "Priority": "high",
     }
-    session.post(url, data=message.encode("utf-8"), headers=headers, timeout=15).raise_for_status()
+    session.post(
+        url,
+        data=message.encode("utf-8"),
+        headers=headers,
+        timeout=15,
+    ).raise_for_status()
 
 
 def _block_heavy_resources(page) -> None:
@@ -67,7 +72,7 @@ def _block_heavy_resources(page) -> None:
 
 def fetch_kereby_urls() -> List[str]:
     urls: List[str] = []
-    seen: Set[str] = set()
+    seen_urls: Set[str] = set()
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
@@ -80,13 +85,19 @@ def fetch_kereby_urls() -> List[str]:
         anchors = page.query_selector_all('a[href*="/bolig/"]')
         for a in anchors:
             href = (a.get_attribute("href") or "").split("#")[0]
+
             if "/bolig/" not in href:
                 continue
+
             if href.startswith("/"):
                 href = "https://kerebyudlejning.dk" + href
-            if href not in seen:
-                seen.add(href)
-                urls.append(href)
+
+            if href in seen_urls:
+                continue
+
+            seen_urls.add(href)
+            urls.append(href)
+
             if len(urls) >= MAX_LISTINGS:
                 break
 
@@ -97,12 +108,12 @@ def fetch_kereby_urls() -> List[str]:
 
 def fetch_cej_urls() -> List[Tuple[str, str]]:
     """
-    Returnerer [(url, tekst_fra_kort)] for CEJ-boliger:
+    Returnerer [(url, tekst)] for CEJ:
     - kun /boliger/ links
-    - kun hvis kort/listingtekst indeholder 'København'
+    - kun hvis anchor/korttekst indeholder 'København'
     """
     results: List[Tuple[str, str]] = []
-    seen: Set[str] = set()
+    seen_urls: Set[str] = set()
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
@@ -115,19 +126,22 @@ def fetch_cej_urls() -> List[Tuple[str, str]]:
         anchors = page.query_selector_all('a[href*="/boliger/"]')
         for a in anchors:
             href = (a.get_attribute("href") or "").split("#")[0]
+            text = (a.inner_text() or "").strip()
+
             if "/boliger/" not in href:
                 continue
 
-            text = (a.inner_text() or "").strip()
             if "københavn" not in text.lower():
                 continue
 
             if href.startswith("/"):
                 href = "https://udlejning.cej.dk" + href
 
-            if href not in seen:
-                seen.add(href)
-                results.append((href, text))
+            if href in seen_urls:
+                continue
+
+            seen_urls.add(href)
+            results.append((href, text))
 
             if len(results) >= MAX_LISTINGS:
                 break
@@ -144,9 +158,11 @@ def main() -> None:
     with sqlite3.connect(DB_PATH) as conn:
         db_init(conn)
 
-        # KEREBY
         kereby_urls = fetch_kereby_urls()
+        cej_results = fetch_cej_urls()
+
         kereby_new = 0
+        cej_new = 0
 
         for url in kereby_urls:
             key = f"kereby:{url}"
@@ -157,17 +173,13 @@ def main() -> None:
             mark_seen(conn, key)
             kereby_new += 1
 
-        # CEJ
-        cej_results = fetch_cej_urls()
-        cej_new = 0
-
         for url, text in cej_results:
             key = f"cej:{url}"
             if already_seen(conn, key):
                 continue
 
-            msg = text if text else url
-            send_ntfy(session, "Ny CEJ listing i København", msg, url)
+            message = text if text else url
+            send_ntfy(session, "Ny CEJ listing i København", message, url)
             mark_seen(conn, key)
             cej_new += 1
 
