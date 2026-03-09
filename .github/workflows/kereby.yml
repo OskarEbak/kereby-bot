@@ -19,18 +19,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Cache bot state (SQLite)
-        uses: actions/cache@v4
+      - name: Restore bot state (SQLite)
+        uses: actions/cache/restore@v4
         with:
           path: ${{ github.workspace }}/kereby_seen.sqlite3
-          key: kereby-state-v1
-          restore-keys: kereby-state-
-
-      - name: Debug cache presence
-        run: |
-          pwd
-          ls -la
-          if [ -f kereby_seen.sqlite3 ]; then echo "DB exists ✅"; else echo "DB missing ❌"; fi
+          key: kereby-state-${{ github.run_id }}
+          restore-keys: |
+            kereby-state-
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -52,18 +47,23 @@ jobs:
         run: |
           python -m playwright install chromium
 
-      - name: Run bot (repeat checks)
+      - name: Run bot repeatedly
         env:
           NTFY_TOPIC: kereby-oeupdate
           MAX_LISTINGS: "30"
           KEREBY_DB: ${{ github.workspace }}/kereby_seen.sqlite3
         run: |
-          for i in {1..9}; do
+          for i in {1..19}; do
             echo "Check $i at $(date -u)"
             python kereby_watch.py
-            sleep 60
+            if [ "$i" -lt 19 ]; then
+              sleep 30
+            fi
           done
 
-      - name: Debug DB after run
-        run: |
-          ls -la kereby_seen.sqlite3 || true
+      - name: Save bot state (SQLite)
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ github.workspace }}/kereby_seen.sqlite3
+          key: kereby-state-${{ github.run_id }}
