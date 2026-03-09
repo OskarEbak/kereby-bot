@@ -47,13 +47,19 @@ jobs:
         run: |
           python -m playwright install chromium
 
-      - name: Run bot
+      - name: Run bot repeatedly
         env:
           NTFY_TOPIC: kereby-oeupdate
           MAX_LISTINGS: "30"
           KEREBY_DB: ${{ github.workspace }}/kereby_seen.sqlite3
         run: |
-          python kereby_watch.py
+          for i in {1..9}; do
+            echo "Check $i at $(date -u)"
+            python kereby_watch.py
+            if [ "$i" -lt 9 ]; then
+              sleep 30
+            fi
+          done
 
       - name: Save bot state (SQLite)
         if: always()
